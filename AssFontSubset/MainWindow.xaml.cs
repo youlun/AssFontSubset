@@ -152,7 +152,9 @@ namespace AssFontSubset
                 int index = -1;
                 var fontNames = new List<string>();
 
-                var parsers = new Action[] { () => {
+                try
+                {
+                    var parsers = new Action[] { () => {
                         var typeface = new GlyphTypeface(new Uri("file://" + file));
                         var result = typeface.Win32FamilyNames.Values.Where(name => fontsInAss.ContainsKey(name));
                         if (result.Count() > 0) {
@@ -186,9 +188,16 @@ namespace AssFontSubset
                     },
                 };
 
-                for (int i = 0; i < parsers.Length && fontNames.Count == 0; i++) {
-                    parsers[i]();
+                    for (int i = 0; i < parsers.Length && fontNames.Count == 0; i++)
+                    {
+                        parsers[i]();
+                    }
                 }
+                catch (Exception e)
+                {
+
+                }
+                
 
                 if (fontNames.Count == 0) {
                     continue;
