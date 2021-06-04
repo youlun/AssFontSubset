@@ -63,6 +63,7 @@ namespace AssFontSubset
         {
             public int FontNumberInCollection;
             public string FileName;
+            public string FontName;
         }
 
         public MainWindow()
@@ -70,8 +71,12 @@ namespace AssFontSubset
             BindingOperations.EnableCollectionSynchronization(TaskList, m_ProcessListLock);
             this.DataContext = this;
 
-            InitializeComponent();
 
+            InitializeComponent();
+            this.SourceHanEllipsis.IsChecked = Properties.Settings.Default.SourceHanEllipsis;
+            this.CloudList.IsChecked = Properties.Settings.Default.CloudList;
+            this.LocalList.IsChecked = Properties.Settings.Default.LocalList;
+            
             this.m_AssFiles = Environment.GetCommandLineArgs().Skip(1).ToArray();
         }
 
@@ -84,16 +89,19 @@ namespace AssFontSubset
                     Task.Run(() => {
                     try {
                         using (var client = new WebClient()) {
-                            byte[] buf = client.DownloadData("https://raw.githubusercontent.com/youlun/AssFontSubset/master/AssFontSubset/Properties/AssemblyInfo.cs");
+                            byte[] buf = client.DownloadData("https://cdn.jsdelivr.net/gh/tastysugar/AssFontSubset@master/AssFontSubset/Properties/AssemblyInfo.cs");
                             string data = Encoding.UTF8.GetString(buf);
                             var match = Regex.Match(data, @"\[assembly: AssemblyVersion\(""([0-9\.]*?)""\)\]", RegexOptions.ECMAScript | RegexOptions.Compiled);
                             if (match.Groups.Count > 1) {
                                 var onlineVer = new Version(match.Groups[1].Value);
                                 var localVer = Assembly.GetEntryAssembly().GetName().Version;
                                 if (onlineVer > localVer) {
-                                    MessageBox.Show("发现新版本，请去 GitHub 主页下载", "新版", MessageBoxButton.OK, MessageBoxImage.Information);
+                                    var result = MessageBox.Show("发现新版本，请去 GitHub 主页下载", "新版", MessageBoxButton.YesNo);
+                                    if (result.ToString() == "Yes") {
+                                            System.Diagnostics.Process.Start("https://github.com/tastysugar/AssFontSubset/releases");
+                                        }
+                                    }
                                 }
-                            }
                             }
                         } catch { }
                     });
@@ -144,10 +152,8 @@ namespace AssFontSubset
         }
 
         private bool FindFontFiles(string fontFolder, Dictionary<string, List<AssFontInfo>> fontsInAss,
-            ref Dictionary<string, FontFileInfo> fontFileInfo)
+            ref List<FontFileInfo> fontFileInfo)
         {
-            var duplicateFontFiles = new Dictionary<string, List<string>>();
-
             var fontFiles = Directory.EnumerateFiles(fontFolder, "*.*", SearchOption.TopDirectoryOnly);
             string[] fontExtensions = { ".fon", ".otf", ".ttc", ".ttf" };
             foreach (var file in fontFiles) {
@@ -208,45 +214,30 @@ namespace AssFontSubset
                     continue;
                 }
 
+
                 foreach (var fontName in fontNames) {
-                    if (fontFileInfo.ContainsKey(fontName)) {
-                        if (!duplicateFontFiles.ContainsKey(fontName)) {
-                            duplicateFontFiles[fontName] = new List<string> { fontFileInfo[fontName].FileName };
-                        }
-                        duplicateFontFiles[fontName].Add(file);
-                    }
-
-                    fontFileInfo[fontName] = new FontFileInfo { FontNumberInCollection = index, FileName = file };
+                    fontFileInfo.Add(new FontFileInfo { FontNumberInCollection = index, FileName = file, FontName = fontName });
                 }
-            }
-
-            if (duplicateFontFiles.Count > 0) {
-                string text = "找到以下重复字体文件：\r\n";
-                foreach (var font in duplicateFontFiles) {
-                    text += $"    {font.Key}：\r\n";
-                    font.Value.Sort();
-                    font.Value.ForEach(file => text += $"        {Path.GetFileName(file)}\r\n");
-                }
-                text += "\r\n";
-                text += "将从重复字体文件中随机选取字体，是否继续？";
-
-                var result = MessageBox.Show(text, "找到重复字体文件", MessageBoxButton.YesNo,
-                    MessageBoxImage.Question,  MessageBoxResult.No);
-                return result == MessageBoxResult.Yes;
             }
 
             return true;
         }
 
         private bool DetectNotExistsFont(Dictionary<string, List<AssFontInfo>> fontsInAss,
-            Dictionary<string, FontFileInfo> fontFiles)
+            List<FontFileInfo> fontFiles)
         {
             List<string> notExists = new List<string>();
+            var fontNames = new List<string>();
+            foreach (var fontFileInfo in fontFiles) {
+                fontNames.Add(fontFileInfo.FontName);
+            }
+
             foreach (var kv in fontsInAss) {
-                if (!fontFiles.ContainsKey(kv.Key)) {
+                if (!fontNames.Contains(kv.Key)) {
                     notExists.Add(kv.Key);
                 }
             }
+
             if (notExists.Count > 0) {
                 MessageBox.Show($"以下字体未找到，无法继续：\r\n{string.Join("\r\n", notExists)}",
                     "缺少字体", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -256,42 +247,33 @@ namespace AssFontSubset
         }
 
         private void CreateFontSubset(string fontFolder, string outputFolder, Dictionary<string, string> textsInAss,
-            Dictionary<string, FontFileInfo> fontFiles, ref List<SubsetFontInfo> subsetFonts)
+            List<FontFileInfo> fontFiles, ref List<SubsetFontInfo> subsetFonts, ref Dictionary<string, string> rdNameLookUp)
         {
             var processors = new List<Dictionary<string, string>>();
 
-            foreach (var text in textsInAss) {
-                var fontName = text.Key;
-                var characters = text.Value;
-                
-                // get around unknown bugs in subset fonts
-                characters = characters.Replace("…", "……");
+            foreach (var font in fontFiles) {
 
-                // remove all regular numeric characters and replace them with a full set of them.
-                var halfwidth_numerical = new Regex(@"[0-9]");
-                if (halfwidth_numerical.IsMatch(characters))
-                {
-                    characters = halfwidth_numerical.Replace(characters, "");
-                    characters += "0123456789";
-                }
+                var fontName = font.FontName;
+                var characters = textsInAss[fontName];
 
+                // fix font fallback on ellipsis.
+                characters = Regex.Replace(characters, @"[a-zA-Z0-9]", "", RegexOptions.Compiled);
+                characters += "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
                 // remove all full width numeric characters and replace them with a full set of them.
-                var fullwidth_numerical = new Regex(@"１２３４５６７８９０");
-                if (fullwidth_numerical.IsMatch(characters))
-                {
+                var fullwidth_numerical = new Regex(@"[１２３４５６７８９０]");
+                if (fullwidth_numerical.IsMatch(characters)) {
                     characters = fullwidth_numerical.Replace(characters, "");
                     characters += "１２３４５６７８９０";
                 }
-                
 
                 var charactersFile = $@"{fontFolder}\{fontName}.txt";
                 using (StreamWriter sw = new StreamWriter(charactersFile, false, new UTF8Encoding(false))) {
                     sw.Write(characters);
                 }
 
-                int index = fontFiles[fontName].FontNumberInCollection;
-                string fontFile = fontFiles[fontName].FileName;
+                int index = font.FontNumberInCollection;
+                string fontFile = font.FileName;
 
                 string outputFile = $@"{outputFolder}\";
                 if (fontFile.EndsWith(".ttc")) {
@@ -300,7 +282,15 @@ namespace AssFontSubset
                     outputFile += $"{Path.GetFileName(fontFile)}";
                 }
 
-                var randomString = this.RandomString(8);
+                // assign same randomized name for fonts with same family name
+                string randomString = "";
+                if (rdNameLookUp.ContainsKey(fontName)) {
+                    randomString = rdNameLookUp[fontName];
+                } else {
+                    randomString = this.RandomString(8);
+                    rdNameLookUp.Add(fontName, randomString);
+                }
+
                 var subsetFontInfo = new SubsetFontInfo {
                     FontNameInAss = fontName,
                     OriginalFontFile = fontFile,
@@ -315,7 +305,7 @@ namespace AssFontSubset
                     { " ", fontFile },
                     { "--text-file=", charactersFile},
                     { "--output-file=" , subsetFontInfo.SubsetFontFile},
-                    { "--name-languages=", "0x0409"}
+                    { "--name-languages=", "*"}
                 };
                 if (index > -1) {
                     args.Add("--font-number=", index.ToString());
@@ -336,8 +326,9 @@ namespace AssFontSubset
             subsetFonts.ForEach(font => File.Delete(font.SubsetFontFile));
         }
 
-        private void ChangeXmlFontName(List<SubsetFontInfo> subsetFonts)
+        private void ChangeXmlFontName(List<SubsetFontInfo> subsetFonts, Dictionary<string, bool> flags)
         {
+
             Parallel.ForEach(subsetFonts, (font) => {
                 if (!this.m_Continue) {
                     return;
@@ -355,21 +346,30 @@ namespace AssFontSubset
                 }
 
                 var ttxContent = File.ReadAllText(ttxFile, new UTF8Encoding(false));
+                ttxContent = ttxContent.Replace("\0", ""); // remove null characters. it might be a bug in ttx.exe. 
                 bool replaced = false;
+
+                var specialFont = ""; // special hack for some fonts
+
                 var xd = new XmlDocument();
                 xd.LoadXml(ttxContent);
-                var namerecordList = xd.SelectNodes("ttFont/name/namerecord");
-                foreach (XmlNode record in namerecordList) {
-                    string nameID = record.Attributes["nameID"].Value.Trim();
-                    if (record.Attributes["langID"].Value != "0x409") {
-                        continue;
-                    }
 
+                // replace font name
+                var namerecords = xd.SelectNodes(@"ttFont/name/namerecord");
+
+                foreach (XmlNode record in namerecords) {
+                    string nameID = record.Attributes["nameID"].Value.Trim();
                     switch (nameID) {
+                        case "0":
+                            record.InnerText = $"Processed by AssFontSubset v{Assembly.GetEntryAssembly().GetName().Version}";
+                            break;
                         case "1":
                         case "3":
                         case "4":
                         case "6":
+                            if (record.InnerText.Contains("Source Han")) {
+                                specialFont = "Source Han";
+                            }
                             record.InnerText = font.SubsetFontName;
                             replaced = true;
                             break;
@@ -377,6 +377,12 @@ namespace AssFontSubset
                             break;
                     }
                 }
+
+                // remove substitution for ellipsis for source han sans/serif font
+                if (flags["SourceHanEllipsis"] == true && specialFont == "Source Han") {
+                    SourceHanFontEllipsis(ref xd);
+                }
+
                 xd.Save(ttxFile);
 
                 if (!replaced) {
@@ -387,6 +393,23 @@ namespace AssFontSubset
                     return;
                 }
             });
+        }
+
+        // Special Hack for Source Han Sans & Source Han Serif ellipsis
+        private void SourceHanFontEllipsis(ref XmlDocument xd) {
+            // find cid for ellipsis (\u2026)
+            XmlNode cmap = xd.SelectSingleNode(@"//map[@code='0x2026']");
+            if (cmap != null) {
+                String ellipsisCid = cmap.Attributes["name"].Value.Trim();
+                XmlNodeList substitutionNodes = xd.SelectNodes($"//Substitution[@in='{ellipsisCid}']");
+                // remove substitution for lower ellipsis. 
+                // NOTE: Vertical ellipsis is cid5xxxxx, and we need to keep it. Hopefully Adobe won't change it.
+                foreach (XmlNode sNode in substitutionNodes) {
+                    if (Regex.IsMatch(sNode.Attributes["out"].Value, @"cid6")) {
+                        sNode.ParentNode.RemoveChild(sNode);
+                    }
+                }
+            }
         }
 
         private void CompileFont(string outputFolder)
@@ -439,6 +462,7 @@ namespace AssFontSubset
                 }
 
                 int index = assContent.FindIndex(row => row.Length >= 13 && row.Substring(0, 13).ToLower() == "[script info]");
+                assContent.Insert(index + 1, $"; Processed by AssFontSubset v{Assembly.GetEntryAssembly().GetName().Version}");
                 assContent.Insert(index + 1, string.Join("\r\n", subsetComments));
 
                 string newAssContent = string.Join("\r\n", assContent);
@@ -473,7 +497,11 @@ namespace AssFontSubset
                 var fontsInAss = new Dictionary<string, List<AssFontInfo>>();
                 var textsInAss = new Dictionary<string, string>();
                 var subsetFonts = new List<SubsetFontInfo>();
-                var fontFiles = new Dictionary<string, FontFileInfo>();
+                var fontFiles = new List<FontFileInfo>();
+                var rdNameLookUp = new Dictionary<string, string>();
+                var flags = new Dictionary<string, bool> {
+                    { "SourceHanEllipsis", (bool)this.SourceHanEllipsis.IsChecked }
+                };
 
                 this.Progressing.IsIndeterminate = true;
                 this.m_SubsetPage.IsEnabled = false;
@@ -494,13 +522,13 @@ namespace AssFontSubset
                         }
 
                         this.Dispatcher.Invoke((() => this.Title = "创建字体子集"));
-                        this.CreateFontSubset(fontFolder, outputFolder, textsInAss, fontFiles, ref subsetFonts);
+                        this.CreateFontSubset(fontFolder, outputFolder, textsInAss, fontFiles, ref subsetFonts, ref rdNameLookUp);
 
                         this.Dispatcher.Invoke((() => this.Title = "字体拆包"));
                         this.DumpFont(subsetFonts);
 
                         this.Dispatcher.Invoke((() => this.Title = "修改字体名称"));
-                        this.ChangeXmlFontName(subsetFonts);
+                        this.ChangeXmlFontName(subsetFonts, flags);
 
                         this.Dispatcher.Invoke((() => this.Title = "字体组装"));
                         this.CompileFont(outputFolder);
@@ -647,6 +675,13 @@ namespace AssFontSubset
                     MessageBox.Show(info.Output, info.Argument, MessageBoxButton.OK, MessageBoxImage.Information);
                 }
             }
+        }
+
+        private void Window_Closed(object sender, EventArgs e) {
+            Properties.Settings.Default.SourceHanEllipsis = (bool)SourceHanEllipsis.IsChecked;
+            Properties.Settings.Default.CloudList = (bool)CloudList.IsChecked;
+            Properties.Settings.Default.LocalList = (bool)LocalList.IsChecked;
+            Properties.Settings.Default.Save();
         }
     }
 }
